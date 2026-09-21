@@ -1,0 +1,315 @@
+--- a/src/base/abci/abc.c
++++ b/src/base/abci/abc.c
+@@ -48,6 +48,7 @@
+ #include "sat/satoko/satoko.h"
+ #include "sat/cnf/cnf.h"
+ #include "proof/cec/cec.h"
++#include "proof/cec/cecGnn.h"
+ #include "proof/acec/acec.h"
+ #include "proof/pdr/pdr.h"
+ #include "misc/tim/tim.h"
+@@ -42794,6 +42795,7 @@
+ ***********************************************************************/
+ int Abc_CommandAbc9Fraig( Abc_Frame_t * pAbc, int argc, char ** argv )
+ {
++    if (Cec_GnnRequested(argc, argv)) return Cec_GnnCommand(pAbc, argc, argv, 0);
+     extern Bnd_Man_t * pBnd;
+     extern void Cec4_ManSetParams( Cec_ParFra_t * pPars );
+     extern Gia_Man_t * Cec2_ManSimulateTest( Gia_Man_t * p, Cec_ParFra_t * pPars );
+@@ -43018,6 +43020,7 @@
+ usage:
+     Abc_Print( -2, "usage: &fraig [-JWRILDCNPM <num>] [-F filename] [-rmdckngxysopwqvh]\n" );
+     Abc_Print( -2, "\t         performs combinational SAT sweeping\n" );
++    Abc_Print( -2, "\t-e MODEL CHECKPOINT : GNN mode; accepts -Y python -G script -U device -C conflicts -v\n" );
+     Abc_Print( -2, "\t-J num : the solver type [default = %d]\n", pPars->jType );
+     Abc_Print( -2, "\t-W num : the number of simulation words [default = %d]\n", pPars->nWords );
+     Abc_Print( -2, "\t-R num : the number of simulation rounds [default = %d]\n", pPars->nRounds );
+@@ -43707,6 +43710,7 @@
+ ***********************************************************************/
+ int Abc_CommandAbc9Cec( Abc_Frame_t * pAbc, int argc, char ** argv )
+ {
++    if (Cec_GnnRequested(argc, argv)) return Cec_GnnCommand(pAbc, argc, argv, 1);
+     extern void Cec_ManPrintCexSummary( Gia_Man_t * p, Abc_Cex_t * pCex, Cec_ParCec_t * pPars );
+     Cec_ParCec_t ParsCec, * pPars = &ParsCec;
+     FILE * pFile;
+@@ -44220,6 +44224,7 @@
+ usage:
+     Abc_Print( -2, "usage: &cec [-CT num] [-M str] [-D str] [-B str] [-I str] [-A kind] [-F str] [-nmdbasxytvwh]\n" );
+     Abc_Print( -2, "\t         new combinational equivalence checker\n" );
++    Abc_Print( -2, "\t-e MODEL CHECKPOINT : GNN mode; accepts -Y python -G script -U device -C conflicts -v\n" );
+     Abc_Print( -2, "\t-C num : the max number of conflicts at a node [default = %d]\n", pPars->nBTLimit );
+     Abc_Print( -2, "\t-T num : approximate runtime limit in seconds [default = %d]\n", pPars->TimeLimit );
+     Abc_Print( -2, "\t-M str : top module name for HDL inputs [default = inferred]\n" );
+--- a/src/base/main/mainReal.c
++++ b/src/base/main/mainReal.c
+@@ -388,7 +388,7 @@
+     {
+         Abc_Stop();
+     }
+-    return 0;
++    return fStatus > 0 ? fStatus : 0;
+ 
+ usage:
+     Abc_UtilsPrintHello( pAbc );
+--- a/src/proof/cec/cecCec.c
++++ b/src/proof/cec/cecCec.c
+@@ -19,6 +19,7 @@
+ ***********************************************************************/
+ 
+ #include "cecInt.h"
++#include "cecGnn.h"
+ #include "proof/fra/fra.h"
+ #include "aig/gia/giaAig.h"
+ #include "misc/extra/extra.h"
+@@ -440,7 +441,7 @@
+     // 1) (SAT) a pair of POs have different value under all-0 pattern
+     // 2) (SAT) a pair of POs has different PI/Const drivers
+     // 3) (UNSAT) 1-2 do not hold and there is no nodes
+-    RetValue = Cec_ManHandleSpecialCases( pInit, pPars );
++    RetValue = Cec_GnnEnabled() ? -1 : Cec_ManHandleSpecialCases( pInit, pPars );
+     if ( RetValue == 0 || RetValue == 1 )
+         return RetValue;
+     // preprocess 
+@@ -462,12 +463,20 @@
+         p->vSimsPi = Vec_WrdDup(pInit->vSimsPi); 
+         p->nSimWords = pInit->nSimWords;
+     }
++    if (Cec_GnnEnabled()) {
++        abctime inferStart = Abc_Clock(), inferElapsed;
++        if (!Cec_GnnInfer(p)) { Gia_ManStop(p); return -2; }
++        inferElapsed = Abc_Clock() - inferStart;
++        clk += inferElapsed; clkTotal += inferElapsed;
++        RetValue = Cec_ManHandleSpecialCases(pInit, pPars);
++        if (RetValue == 0 || RetValue == 1) { Gia_ManStop(p); return RetValue; }
++    }
+     // sweep for equivalences
+     Cec_ManFraSetDefaultParams( pParsFra );
+     pParsFra->nItersMax    = 1000;
+     pParsFra->nBTLimit     = pPars->nBTLimit;
+     pParsFra->TimeLimit    = pPars->TimeLimit;
+-    pParsFra->fUseOrigIds  = pPars->fUseOrigIds;
++    pParsFra->fUseOrigIds  = pPars->fUseOrigIds || Cec_GnnEnabled();
+     pParsFra->fVerbose     = pPars->fVerbose;
+     pParsFra->fVeryVerbose = pPars->fVeryVerbose;
+     pParsFra->fCheckMiter  = 1;
+--- a/src/proof/cec/cecCore.c
++++ b/src/proof/cec/cecCore.c
+@@ -19,6 +19,7 @@
+ ***********************************************************************/
+ 
+ #include "cecInt.h"
++#include "cecGnn.h"
+ 
+ ABC_NAMESPACE_IMPL_START
+ 
+@@ -458,6 +459,7 @@
+             break;
+         }
+ clk = Abc_Clock();
++        Cec_GnnBatchBegin(p, pSim, pPat, pSrm);
+         if ( pPars->fRunCSat )
+             Cec_ManSatSolveCSat( pPat, pSrm, pParsSat ); 
+         else
+@@ -470,6 +472,7 @@
+             p->pAig = NULL;
+             goto finalize;
+         }
++        Cec_GnnBatchEnd();
+         Gia_ManStop( pSrm );
+ 
+         // update the manager
+@@ -537,6 +540,7 @@
+         }
+     }
+ finalize:
++    Cec_GnnBatchEnd();
+     if ( pPars->fVerbose )
+         printf( "Performed %d SAT calls: P = %d  D = %d  F = %d\n", 
+             p->nAllProvedS + p->nAllDisprovedS + p->nAllFailedS, p->nAllProvedS, p->nAllDisprovedS, p->nAllFailedS );
+--- a/src/proof/cec/cecSatG2.c
++++ b/src/proof/cec/cecSatG2.c
+@@ -21,6 +21,7 @@
+ #include "aig/gia/gia.h"
+ #include "misc/util/utilTruth.h"
+ #include "cec.h"
++#include "cecGnn.h"
+ #include "bdd/extrab/extraBdd.h"
+ #include "base/abc/abc.h"
+ #include "map/if/if.h"
+@@ -1707,6 +1708,7 @@
+     }
+     else if ( status == GLUCOSE_UNSAT )
+     {
++        Cec_GnnRecordMerge(p->pAig, iObj, iRepr);
+         //printf( "Proved: %d == %d.\n", Abc_Lit2Var(pRepr->Value), Abc_Lit2Var(pObj->Value) );
+         p->nSatUnsat++;
+         pObj->Value = Abc_LitNotCond( pRepr->Value, fCompl );
+@@ -1858,6 +1860,51 @@
+     Vec_WrdFree( vSims );
+     Vec_WrdFree( vSimsPi );
+ }
++static int Cec4_GnnBuild(Cec4_Man_t *m, Vec_Bit_t *built, int node)
++{
++    Gia_Man_t *p = m->pAig;
++    Gia_Obj_t *o = Gia_ManObj(p, node), *n;
++    int a, b;
++    if (!node || Gia_ObjIsCi(o) || Vec_BitEntry(built, node)) return o->Value;
++    a = Abc_LitNotCond(Cec4_GnnBuild(m, built, Gia_ObjFaninId0p(p, o)), Gia_ObjFaninC0(o));
++    b = Abc_LitNotCond(Cec4_GnnBuild(m, built, Gia_ObjFaninId1p(p, o)), Gia_ObjFaninC1(o));
++    o->Value = Gia_ManHashAnd(m->pNew, a, b);
++    Vec_BitWriteEntry(built, node, 1);
++    m->nAndNodes++;
++    n = Gia_ManObj(m->pNew, Abc_Lit2Var(o->Value));
++    if (Gia_ObjIsAnd(n) && (Vec_BitEntry(m->vFails, Gia_ObjFaninId0p(m->pNew, n)) ||
++                           Vec_BitEntry(m->vFails, Gia_ObjFaninId1p(m->pNew, n))))
++        Vec_BitWriteEntry(m->vFails, Abc_Lit2Var(n->Value), 1);
++    return o->Value;
++}
++
++static void Cec4_GnnSweep(Cec4_Man_t *m)
++{
++    Gia_Man_t *p = m->pAig;
++    Vec_Int_t *order = Cec_GnnPrepassOrder(p);
++    Vec_Bit_t *built = Vec_BitStart(Gia_ManObjNum(p));
++    Gia_Obj_t *o, *r;
++    int node, k, repr;
++    Vec_IntForEachEntry(order, node, k) {
++        if (!Gia_ObjHasRepr(p, node) || Gia_ObjProved(p, node) || Gia_ObjFailed(p, node)) continue;
++        o = Gia_ManObj(p, node);
++        Cec4_GnnBuild(m, built, node);
++        r = Cec4_ManFindRepr(p, m, node);
++        if (!r) continue;
++        repr = Gia_ObjId(p, r);
++        Cec4_GnnBuild(m, built, repr);
++        if (Abc_Lit2Var(o->Value) == Abc_Lit2Var(r->Value)) {
++            assert((o->Value ^ r->Value) == (o->fPhase ^ r->fPhase));
++            Gia_ObjSetProved(p, node);
++            Cec_GnnRecordMerge(p, node, repr);
++            if (!repr) m->iLastConst = node;
++        } else if (Cec4_ManSweepNode(m, node, repr) && Gia_ObjProved(p, node))
++            o->Value = Abc_LitNotCond(r->Value, o->fPhase ^ r->fPhase);
++    }
++    Gia_ManForEachAnd(p, o, node) Cec4_GnnBuild(m, built, node);
++    Vec_IntFree(order); Vec_BitFree(built);
++}
++
+ int Cec4_ManPerformSweeping( Gia_Man_t * p, Cec_ParFra_t * pPars, Gia_Man_t ** ppNew, int fSimOnly )
+ {
+ 
+@@ -1928,6 +1975,7 @@
+ 
+     // perform additional simulation
+     Cec4_ManCandIterStart( pMan );
++    if (Cec_GnnPrepass()) Vec_IntClear(pMan->vCands);
+     for ( i = 0; fSimulate && i < pPars->nGenIters; i++ )
+     {
+         Cec4_ManSimulateCis( p );
+@@ -1946,6 +1994,7 @@
+     Vec_WrdFill( p->vSimsPi, Vec_WrdSize(p->vSimsPi), 0 );
+     pMan->nSatSat = 0;
+     pMan->pNew = Cec4_ManStartNew( p );
++    if (Cec_GnnPrepass()) { Cec4_GnnSweep(pMan); goto gnn_swept; }
+     Gia_ManForEachAnd( p, pObj, i )
+     {
+         Gia_Obj_t * pObjNew; 
+@@ -2010,6 +2059,7 @@
+         // Bnd_ManPrintMappings();
+     }
+ 
++gnn_swept:
+     if ( p->iPatsPi > 0 )
+     {
+         abctime clk2 = Abc_Clock();
+@@ -2022,9 +2072,12 @@
+         Cec4_ManPrintStats( p, pPars, pMan, 0 );
+     if ( ppNew )
+     {
+-        Gia_ManForEachCo( p, pObj, i )
+-            pObj->Value = Gia_ManAppendCo( pMan->pNew, Gia_ObjFanin0Copy(pObj) );
+-        *ppNew = Gia_ManCleanup( pMan->pNew );
++        if (Cec_GnnPrepass()) *ppNew = Cec_GnnReplay(p);
++        else {
++            Gia_ManForEachCo( p, pObj, i )
++                pObj->Value = Gia_ManAppendCo( pMan->pNew, Gia_ObjFanin0Copy(pObj) );
++            *ppNew = Gia_ManCleanup( pMan->pNew );
++        }
+     }
+ finalize:
+     if ( pPars->fVerbose )
+--- a/src/proof/cec/cecSolve.c
++++ b/src/proof/cec/cecSolve.c
+@@ -19,6 +19,7 @@
+ ***********************************************************************/
+ 
+ #include "cecInt.h"
++#include "cecGnn.h"
+ 
+ ABC_NAMESPACE_IMPL_START
+ 
+@@ -701,7 +702,7 @@
+     Bar_Progress_t * pProgress = NULL;
+     Cec_ManSat_t * p;
+     Gia_Obj_t * pObj;
+-    int i, status;
++    int i, k, status;
+     abctime clk = Abc_Clock(), clk2;
+     Vec_PtrFreeP( &pAig->vSeqModelVec );
+     if ( pPars->fSaveCexes )
+@@ -719,8 +720,11 @@
+     Gia_ManIncrementTravId( pAig );
+     p = Cec_ManSatCreate( pAig, pPars );
+     pProgress = Bar_ProgressStart( stdout, Gia_ManPoNum(pAig) );
+-    Gia_ManForEachCo( pAig, pObj, i )
+-    {
++    for (k = 0; k < Gia_ManCoNum(pAig); ++k)
++    {
++        i = Cec_GnnOrder(k);
++        pObj = Gia_ManCo(pAig, i);
++        if (Cec_GnnBefore(i)) continue;
+         if ( Gia_ObjIsConst0(Gia_ObjFanin0(pObj)) )
+         {
+             status = !Gia_ObjFaninC0(pObj);
+@@ -759,8 +763,7 @@
+             Abc_Print( 1, "Dumping hard cone into file \"%s\".\n", "gia_hard.aig" );
+         }
+ */
+-        if ( status != 0 )
+-            continue;
++        if ( status != 0 ) { Cec_GnnAfter(i, status); continue; }
+         // save the pattern
+         if ( pPat )
+         {
+@@ -768,6 +771,7 @@
+             Cec_ManPatSavePattern( pPat, p, pObj );
+             pPat->timeTotalSave += Abc_Clock() - clk3;
+         }
++        Cec_GnnAfter(i, status);
+         // quit if one of them is solved
+         if ( pPars->fCheckMiter )
+             break;
+--- a/src/proof/cec/cecSweep.c
++++ b/src/proof/cec/cecSweep.c
+@@ -19,6 +19,7 @@
+ ***********************************************************************/
+ 
+ #include "cecInt.h"
++#include "cecGnn.h"
+ 
+ ABC_NAMESPACE_IMPL_START
+ 
+@@ -252,6 +253,7 @@
+     p->nAllProved = p->nAllDisproved = p->nAllFailed = 0;
+     Gia_ManForEachCo( pNew, pObj, k )
+     {
++        if (Cec_GnnSkipped(k)) continue;
+         iRepr = Vec_IntEntry( p->vXorNodes, 2*k );
+         iNode = Vec_IntEntry( p->vXorNodes, 2*k+1 );
+         pReprOld = Gia_ManObj(p->pAig, iRepr);
+--- a/src/proof/cec/module.make
++++ b/src/proof/cec/module.make
+@@ -23,3 +23,5 @@
+     src/proof/cec/cecSplit.c \
+     src/proof/cec/cecSynth.c \
+     src/proof/cec/cecSweep.c
++
++SRC += src/proof/cec/cecGnn.c src/proof/cec/cecGnnOrder.c

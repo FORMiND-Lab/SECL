@@ -1,0 +1,36 @@
+/results/
+/result/
+/checkpoints/
+/releases/
+*.tar.gz
+*.pt
+*.pth
+*.ckpt
+!/pretrained/DeepGate2.ckpt
+*.log
+*.tfevents.*
+abc.history
+
+# ABC downloads and builds
+/build/
+/dist/
+*.egg-info/
+*.o
+*.d
+*.a
+*.so
+/abc/*/upstream.tar.gz
+/abc/*/build.log
+/abc/build/
+
+# Python and editor state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
