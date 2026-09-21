@@ -1,0 +1,44 @@
+/results/
+/result/
+/checkpoints/
+/releases/
+*.tar.gz
+*.pt
+*.pth
+*.ckpt
+!/pretrained/DeepGate2.ckpt
+*.log
+*.tfevents.*
+abc.history
+
+# ABC source downloads and compiled artifacts
+/bin/
+/.cache/
+/build/
+/dist/
+*.egg-info/
+*.o
+*.d
+*.a
+*.so
+/abc/abc-gnn/
+
+# Local tests and test-only configuration
+/tests/
+/pytest.ini
+/requirements-dev.txt
+test_*.py
+
+# Python and editor state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+.idea/
+.vscode/
+.agents/
+.codex/
+.DS_Store

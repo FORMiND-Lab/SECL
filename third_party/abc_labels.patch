@@ -1,0 +1,679 @@
+--- a/src/base/abci/abc.c
++++ b/src/base/abci/abc.c
+@@ -40788,7 +40788,7 @@
+     int fCbs = 1, approxLim = 600, subBatchSz = 1, adaRecycle = 500, nMaxNodes = 0;
+     Cec4_ManSetParams( pPars );
+     Extra_UtilGetoptReset();
+-    while ( ( c = Extra_UtilGetopt( argc, argv, "JWRILDCNPMFrmdckngxysopwqvh" ) ) != EOF )
++    while ( ( c = Extra_UtilGetopt( argc, argv, "JWRILDCNPMFUrmdckngxysopwqvh" ) ) != EOF )
+     {
+         switch ( c )
+         {
+@@ -40911,6 +40911,17 @@
+             pPars->pDumpName = argv[globalUtilOptind];
+             globalUtilOptind++;
+             break;            
++        case 'U':
++            if ( globalUtilOptind >= argc )
++            {
++                Abc_Print( -1, "Command line switch \"-U\" should be followed by a file name.\n" );
++                goto usage;
++            }
++            pPars->pFinalClassesFile = argv[globalUtilOptind];
++            // Strict mode for -U: require SAT-track validation before merge/output.
++            pPars->fStrictSatPairs = 1;
++            globalUtilOptind++;
++            break;
+         case 'r':
+             pPars->fRewriting ^= 1;
+             break;
+@@ -40963,6 +40974,13 @@
+     if ( pAbc->pGia == NULL )
+     {
+         Abc_Print( -1, "Abc_CommandAbc9Fraig(): There is no AIG.\n" );
++        return 1;
++    }
++    // Original-ID proof collection is implemented by the default engine.
++    if ( pPars->pFinalClassesFile &&
++         (fUseSave || fUseIvy || fUseAlgo || fUseAlgoG || fUseAlgoX || fUseAlgoY) )
++    {
++        Abc_Print( -1, "-U is supported only by the default &fraig engine.\n" );
+         return 1;
+     }
+     if ( fUseSave )
+@@ -40992,7 +41010,7 @@
+     return 0;
+ 
+ usage:
+-    Abc_Print( -2, "usage: &fraig [-JWRILDCNPM <num>] [-F filename] [-rmdckngxysopwvh]\n" );
++    Abc_Print( -2, "usage: &fraig [-JWRILDCNPM <num>] [-F filename] [-U filename] [-rmdckngxysopwvh]\n" );
+     Abc_Print( -2, "\t         performs combinational SAT sweeping\n" );
+     Abc_Print( -2, "\t-J num : the solver type [default = %d]\n", pPars->jType );
+     Abc_Print( -2, "\t-W num : the number of simulation words [default = %d]\n", pPars->nWords );
+@@ -41005,6 +41023,7 @@
+     Abc_Print( -2, "\t-P num : the number of pattern generation iterations [default = %d]\n", pPars->nGenIters );
+     Abc_Print( -2, "\t-M num : the node count limit to call the old sweeper [default = %d]\n", nMaxNodes );
+     Abc_Print( -2, "\t-F file: the file name to dump primary output information [default = none]\n" );
++    Abc_Print( -2, "\t-U file: dump proof-closed original-ID pairs and unresolved nodes [default = none]\n" );
+     Abc_Print( -2, "\t-r     : toggle the use of AIG rewriting [default = %s]\n", pPars->fRewriting? "yes": "no" );
+     Abc_Print( -2, "\t-m     : toggle miter vs. any circuit [default = %s]\n", pPars->fCheckMiter? "miter": "circuit" );
+     Abc_Print( -2, "\t-d     : toggle using double output miters [default = %s]\n", pPars->fDualOut? "yes": "no" );
+--- a/src/proof/cec/cec.h
++++ b/src/proof/cec/cec.h
+@@ -50,6 +50,7 @@
+     int              fNonChrono;    // use non-chronological backtracling (for circuit SAT only)
+     int              fPolarFlip;    // flops polarity of variables
+     int              fCheckMiter;   // the circuit is the miter
++    int              fRequireSatCall; // require an actual SAT query for label extraction
+ //    int              fFirstStop;    // stop on the first sat output
+     int              fLearnCls;     // perform clause learning
+     int              fSaveCexes;    // saves counter-examples
+@@ -67,6 +68,7 @@
+     int              TimeLimit;     // the runtime limit in seconds
+     int              fDualOut;      // miter with separate outputs
+     int              fCheckMiter;   // the circuit is the miter
++    int              fRequireSatCall; // require an actual SAT query for label extraction
+ //    int              fFirstStop;    // stop on the first sat output
+     int              fSeqSimulate;  // performs sequential simulation
+     int              fLatchCorr;    // consider only latch outputs
+@@ -88,6 +90,7 @@
+     int              TimeLimit;     // the runtime limit in seconds
+     int              fDualOut;      // miter with separate outputs
+     int              fCheckMiter;   // the circuit is the miter
++    int              fRequireSatCall; // require an actual SAT query for label extraction
+ //    int              fFirstStop;    // stop on the first sat output
+     int              fVerbose;      // verbose stats
+ };
+@@ -110,6 +113,7 @@
+     int              nGenIters;     // pattern generation iterations
+     int              fRewriting;    // enables AIG rewriting
+     int              fCheckMiter;   // the circuit is the miter
++    int              fRequireSatCall; // require an actual SAT query for label extraction
+ //    int              fFirstStop;    // stop on the first sat output
+     int              fDualOut;      // miter with separate outputs
+     int              fColorDiff;    // miter with separate outputs
+@@ -117,12 +121,17 @@
+     int              fRunCSat;      // enable another solver
+     int              fUseCones;     // use cones
+     int              fUseOrigIds;   // enable recording of original IDs
++    int              fStrictSatPairs; // disable speculative substitution for label extraction
+     int              fVeryVerbose;  // verbose stats
+     int              fVerbose;      // verbose stats
+     int              iOutFail;      // the failed output
+     int              fBMiterInfo;   // printing BMiter information
+     int              nPO;           // number of po in original design given a bmiter
+     char *           pDumpName;     // file name to dump statistics
++    char *           pFinalClassesFile; // proof-closed pairs and unresolved original IDs
++    void *           pEquivPairsVec;  // SAT-proved pairs
++    void *           pStructPairsVec; // structurally implied pairs
++    void *           pFailedPairsVec; // unresolved candidate pairs
+ };
+ 
+ // combinational equivalence checking parameters
+--- a/src/proof/cec/cecCore.c
++++ b/src/proof/cec/cecCore.c
+@@ -26,6 +26,236 @@
+ ////////////////////////////////////////////////////////////////////////
+ ///                        DECLARATIONS                              ///
+ ////////////////////////////////////////////////////////////////////////
++
++typedef struct Cec_Pair_t_
++{
++    int Id1;
++    int Id2;
++} Cec_Pair_t;
++
++static inline int Cec_UnionFindFind( int * pParent, int i )
++{
++    int Root = i;
++    while ( pParent[Root] != Root )
++        Root = pParent[Root];
++    while ( pParent[i] != i )
++    {
++        int Next = pParent[i];
++        pParent[i] = Root;
++        i = Next;
++    }
++    return Root;
++}
++
++static inline void Cec_UnionFindUnion( int * pParent, unsigned char * pRank, int i, int k )
++{
++    int RootI = Cec_UnionFindFind( pParent, i );
++    int RootK = Cec_UnionFindFind( pParent, k );
++    int Temp;
++    if ( RootI == RootK )
++        return;
++    if ( pRank[RootI] < pRank[RootK] )
++    {
++        Temp = RootI;
++        RootI = RootK;
++        RootK = Temp;
++    }
++    pParent[RootK] = RootI;
++    if ( pRank[RootI] == pRank[RootK] )
++        pRank[RootI]++;
++}
++
++static int Cec_PairCompare( const void * p1, const void * p2 )
++{
++    const Cec_Pair_t * pA = (const Cec_Pair_t *)p1;
++    const Cec_Pair_t * pB = (const Cec_Pair_t *)p2;
++    if ( pA->Id1 < pB->Id1 ) return -1;
++    if ( pA->Id1 > pB->Id1 ) return  1;
++    if ( pA->Id2 < pB->Id2 ) return -1;
++    if ( pA->Id2 > pB->Id2 ) return  1;
++    return 0;
++}
++
++// Collect the input-AIG IDs of all live objects that collapsed onto the same
++// object during the just-completed reduction.  Gia_ManOrigIdsRemap() keeps one
++// source ID per surviving object, so this must run while the old manager (and
++// its complete vIdsOrig/Value mapping) is still available.  A star per reduced
++// object is sufficient: pairs accumulated over all rounds retain the complete
++// transitive merge closure even when the representative changes later.
++static int Cec_ManCollectReductionOrigPairs( Gia_Man_t * pOld, Vec_Int_t * vPairs )
++{
++    Vec_Int_t * vReduced2Orig;
++    Gia_Obj_t * pObj;
++    int i, nAdded = 0;
++    if ( pOld == NULL || pOld->vIdsOrig == NULL || vPairs == NULL )
++        return 0;
++    vReduced2Orig = Vec_IntStartFull( Gia_ManObjNum(pOld) );
++    Gia_ManForEachObj( pOld, pObj, i )
++    {
++        int iReduced, iOrig, iOrigPrev;
++        if ( Gia_ObjIsCo(pObj) || !~pObj->Value )
++            continue;
++        iReduced = Abc_Lit2Var( pObj->Value );
++        if ( iReduced < 0 || iReduced >= Vec_IntSize(vReduced2Orig) )
++            continue;
++        iOrig = Vec_IntEntry( pOld->vIdsOrig, i );
++        if ( iOrig < 0 )
++            continue;
++        iOrigPrev = Vec_IntEntry( vReduced2Orig, iReduced );
++        if ( iOrigPrev == -1 )
++            Vec_IntWriteEntry( vReduced2Orig, iReduced, iOrig );
++        else if ( iOrigPrev != iOrig )
++        {
++            Vec_IntPushTwo( vPairs, iOrigPrev, iOrig );
++            nAdded++;
++        }
++    }
++    Vec_IntFree( vReduced2Orig );
++    return nAdded;
++}
++
++static void Cec_ManDumpFinalOrigClasses( Gia_Man_t * pAig, Vec_Int_t * vSatPairs, Vec_Int_t * vStructPairs, Vec_Int_t * vFailedPairs, const char * pFileName, int fVerbose )
++{
++    FILE * pFile;
++    Cec_Pair_t * pPairs = NULL;
++    Cec_Pair_t * pFailed = NULL;
++    int * pParent = NULL;
++    unsigned char * pRank = NULL;
++    int nRawSatPairs = 0, nRawStructPairs = 0, nRawPairs = 0;
++    int nValidPairs = 0, nUniquePairs = 0;
++    int nRawFailedPairs = vFailedPairs ? Vec_IntSize(vFailedPairs) / 2 : 0;
++    int nValidFailed = 0, nUnknown = 0, nResolvedFailed = 0;
++    int nBadPairs = 0, nObjects = pAig ? Gia_ManObjNum(pAig) : 0;
++    int k;
++    pFile = fopen( pFileName, "w" );
++    if ( pFile == NULL )
++    {
++        Abc_Print( -1, "Cannot open file \"%s\" for writing proof-closed original-ID pairs.\n", pFileName );
++        return;
++    }
++
++    if ( pAig && pAig->pName )
++        fprintf( pFile, "%s\n", pAig->pName );
++    else
++        fprintf( pFile, "circuit\n" );
++
++    nRawSatPairs = vSatPairs ? Vec_IntSize(vSatPairs) / 2 : 0;
++    nRawStructPairs = vStructPairs ? Vec_IntSize(vStructPairs) / 2 : 0;
++    nRawPairs = nRawSatPairs + nRawStructPairs;
++    if ( nRawPairs )
++        pPairs = ABC_ALLOC( Cec_Pair_t, nRawPairs );
++
++    for ( k = 0; k < nRawSatPairs; k++ )
++    {
++        int Id1 = Vec_IntEntry( vSatPairs, 2*k );
++        int Id2 = Vec_IntEntry( vSatPairs, 2*k + 1 );
++        int Temp;
++        if ( Id1 < 0 || Id2 < 0 || Id1 == Id2 )
++        {
++            nBadPairs++;
++            continue;
++        }
++        if ( Id1 > Id2 )
++        {
++            Temp = Id1;
++            Id1 = Id2;
++            Id2 = Temp;
++        }
++        pPairs[nValidPairs].Id1 = Id1;
++        pPairs[nValidPairs].Id2 = Id2;
++        nValidPairs++;
++    }
++    for ( k = 0; k < nRawStructPairs; k++ )
++    {
++        int Id1 = Vec_IntEntry( vStructPairs, 2*k );
++        int Id2 = Vec_IntEntry( vStructPairs, 2*k + 1 );
++        int Temp;
++        if ( Id1 < 0 || Id2 < 0 || Id1 == Id2 )
++        {
++            nBadPairs++;
++            continue;
++        }
++        if ( Id1 > Id2 )
++        {
++            Temp = Id1;
++            Id1 = Id2;
++            Id2 = Temp;
++        }
++        pPairs[nValidPairs].Id1 = Id1;
++        pPairs[nValidPairs].Id2 = Id2;
++        nValidPairs++;
++    }
++    if ( nValidPairs )
++        qsort( pPairs, nValidPairs, sizeof(Cec_Pair_t), Cec_PairCompare );
++    for ( k = 0; k < nValidPairs; k++ )
++    {
++        if ( nUniquePairs > 0 &&
++             pPairs[nUniquePairs-1].Id1 == pPairs[k].Id1 &&
++             pPairs[nUniquePairs-1].Id2 == pPairs[k].Id2 )
++            continue;
++        pPairs[nUniquePairs++] = pPairs[k];
++    }
++
++    if ( nUniquePairs )
++    {
++        for ( k = 0; k < nUniquePairs; k++ )
++            fprintf( pFile, "SAT_Proved: %d == %d\n", pPairs[k].Id1, pPairs[k].Id2 );
++    }
++    else
++        fprintf( pFile, "No_Proved\n" );
++
++    // A failed SAT call is unknown only if its exact attempted relation is
++    // absent from the final SAT/structural proof closure.  Unknownness is
++    // node-local: never propagate it to other proved members of either class.
++    if ( nObjects > 0 && nRawFailedPairs > 0 )
++    {
++        pParent = ABC_ALLOC( int, nObjects );
++        pRank = ABC_CALLOC( unsigned char, nObjects );
++        pFailed = ABC_ALLOC( Cec_Pair_t, nRawFailedPairs );
++        for ( k = 0; k < nObjects; k++ )
++            pParent[k] = k;
++        for ( k = 0; k < nUniquePairs; k++ )
++            if ( pPairs[k].Id1 < nObjects && pPairs[k].Id2 < nObjects )
++                Cec_UnionFindUnion( pParent, pRank, pPairs[k].Id1, pPairs[k].Id2 );
++        for ( k = 0; k < nRawFailedPairs; k++ )
++        {
++            int iRepr = Vec_IntEntry( vFailedPairs, 2*k );
++            int iNode = Vec_IntEntry( vFailedPairs, 2*k + 1 );
++            if ( iRepr < 0 || iNode < 0 || iRepr >= nObjects || iNode >= nObjects || iRepr == iNode )
++            {
++                nBadPairs++;
++                continue;
++            }
++            if ( Cec_UnionFindFind(pParent, iRepr) == Cec_UnionFindFind(pParent, iNode) )
++            {
++                nResolvedFailed++;
++                continue;
++            }
++            pFailed[nValidFailed].Id1 = iNode;
++            pFailed[nValidFailed].Id2 = iRepr;
++            nValidFailed++;
++        }
++        if ( nValidFailed )
++        {
++            qsort( pFailed, nValidFailed, sizeof(Cec_Pair_t), Cec_PairCompare );
++            for ( k = 0; k < nValidFailed; k++ )
++            {
++                if ( k > 0 && pFailed[k-1].Id1 == pFailed[k].Id1 )
++                    continue;
++                fprintf( pFile, "SAT_Unknown: %d ?= %d\n", pFailed[k].Id1, pFailed[k].Id2 );
++                nUnknown++;
++            }
++        }
++    }
++    fclose( pFile );
++    if ( fVerbose )
++        Abc_Print( 1, "[orig-pairs] raw_sat=%d raw_merge=%d unique_proved=%d raw_failed=%d unresolved_nodes=%d resolved_failed=%d bad_pairs=%d -> \"%s\".\n",
++            nRawSatPairs, nRawStructPairs, nUniquePairs, nRawFailedPairs, nUnknown, nResolvedFailed, nBadPairs, pFileName );
++    ABC_FREE( pPairs );
++    ABC_FREE( pFailed );
++    ABC_FREE( pParent );
++    ABC_FREE( pRank );
++}
+ 
+ ////////////////////////////////////////////////////////////////////////
+ ///                     FUNCTION DEFINITIONS                         ///
+@@ -140,9 +370,14 @@
+     p->fColorDiff     =       0;  // miter with separate outputs
+     p->fSatSweeping   =       0;  // enable SAT sweeping
+     p->fUseCones      =       0;  // use cones
++    p->fStrictSatPairs =      0;  // require SAT-track validation before merge
+     p->fVeryVerbose   =       0;  // verbose stats
+     p->fVerbose       =       0;  // verbose stats
+     p->iOutFail       =      -1;  // the failed output
++    p->pFinalClassesFile = NULL;
++    p->pEquivPairsVec = NULL;
++    p->pStructPairsVec = NULL;
++    p->pFailedPairsVec = NULL;
+ } 
+ 
+ /**Function*************************************************************
+@@ -347,6 +582,8 @@
+     Cec_ParSat_t ParsSat, * pParsSat = &ParsSat;
+     Cec_ParSim_t ParsSim, * pParsSim = &ParsSim;
+     Gia_Man_t * pIni, * pSrm, * pTemp;
++    Vec_Int_t * vStructPairs = NULL;
++    Vec_Int_t * vFailedPairs = NULL;
+     Cec_ManFra_t * p;
+     Cec_ManSim_t * pSim;
+     Cec_ManPat_t * pPat;
+@@ -355,20 +592,27 @@
+     if ( pPars->fVerbose )
+         printf( "Simulating %d words for %d rounds. SAT solving with %d conflicts.\n", pPars->nWords, pPars->nRounds, pPars->nBTLimit );
+ 
+-    // duplicate AIG and transfer equivalence classes
+     Gia_ManRandom( 1 );
+     pIni = Gia_ManDup(pAig);
++
+     pIni->pReprs = pAig->pReprs; pAig->pReprs = NULL;
+     pIni->pNexts = pAig->pNexts; pAig->pNexts = NULL;
+-    if ( pPars->fUseOrigIds )
++    // Enable original ID tracking if output file is specified or fUseOrigIds is set
++    if ( pPars->fUseOrigIds || pPars->pFinalClassesFile )
+     {
+         Gia_ManOrigIdsInit( pIni );
+         Vec_IntFreeP( &pAig->vIdsEquiv );
+         pAig->vIdsEquiv = Vec_IntAlloc( 1000 );
++        vStructPairs = Vec_IntAlloc( 1000 );
++        vFailedPairs = Vec_IntAlloc( 1000 );
++        // Store pointer to vIdsEquiv for access from cecSweep.c
++        pPars->pEquivPairsVec = pAig->vIdsEquiv;
++        pPars->pStructPairsVec = vStructPairs;
++        pPars->pFailedPairsVec = vFailedPairs;
+     }
+     if ( pAig->vSimsPi )
+     {
+-        pIni->vSimsPi = Vec_WrdDup(pAig->vSimsPi); 
++        pIni->vSimsPi = Vec_WrdDup(pAig->vSimsPi);
+         pIni->nSimWords = pAig->nSimWords;
+     }
+ 
+@@ -389,6 +633,10 @@
+     Cec_ManSatSetDefaultParams( pParsSat );
+     pParsSat->nBTLimit = pPars->nBTLimit;
+     pParsSat->fVerbose = pPars->fVeryVerbose;
++    // -U promises that a pair is exported/merged only after an actual SAT
++    // query.  Propagate this contract to the solver so an accidentally
++    // simplified constant miter cannot silently take the legacy shortcut.
++    pParsSat->fRequireSatCall = pPars->fStrictSatPairs;
+     // simulation patterns
+     pPat = Cec_ManPatStart();
+     //pPat->fVerbose = pPars->fVeryVerbose;
+@@ -416,7 +664,7 @@
+ //            p->pAig->pIso = Cec_ManDetectIsomorphism( p->pAig );
+ //            Gia_ManEquivTransform( p->pAig, 1 );
+         }
+-        pSrm = Cec_ManFraSpecReduction( p ); 
++        pSrm = Cec_ManFraSpecReduction( p );
+ 
+ //        Gia_AigerWrite( pSrm, "gia_srm.aig", 0, 0, 0 );
+ 
+@@ -460,13 +708,18 @@
+         }
+         Gia_ManStop( pSrm );
+ 
+-        // update the manager
+-        pSim->pAig = p->pAig = Gia_ManEquivReduceAndRemap( pTemp = p->pAig, 0, pParsSim->fDualOut );
++        // Update the manager.  Reduction both substitutes SAT-proved
++        // representatives and structurally hashes newly congruent fanouts.
++        // Capture every old original ID sharing a reduced object before pTemp
++        // is destroyed; otherwise vIdsOrig keeps only one of those IDs.
++        pTemp = p->pAig;
++        pSim->pAig = p->pAig = Gia_ManEquivReduceAndRemap( pTemp, 0, pParsSim->fDualOut );
+         if ( p->pAig == NULL )
+         {
+             p->pAig = pTemp;
+             break;
+         }
++        Cec_ManCollectReductionOrigPairs( pTemp, vStructPairs );
+         Gia_ManStop( pTemp );
+         if ( p->pPars->fVerbose )
+         {
+@@ -525,6 +778,8 @@
+         }
+     }
+ finalize:
++    if ( pPars->pFinalClassesFile )
++        Cec_ManDumpFinalOrigClasses( pAig, pAig->vIdsEquiv, vStructPairs, vFailedPairs, pPars->pFinalClassesFile, pPars->fVerbose );
+     if ( pPars->fVerbose )
+         printf( "Performed %d SAT calls: P = %d  D = %d  F = %d\n", 
+             p->nAllProvedS + p->nAllDisprovedS + p->nAllFailedS, p->nAllProvedS, p->nAllDisprovedS, p->nAllFailedS );
+@@ -539,6 +794,7 @@
+         Abc_PrintTimeP( 1, "Sat ", p->timeSat-pPat->timeTotalSave, Abc_Clock() - (int)clkTotal );
+         Abc_PrintTimeP( 1, "Pat ", p->timePat+pPat->timeTotalSave, Abc_Clock() - (int)clkTotal );
+         Abc_PrintTime( 1, "Time", (int)(Abc_Clock() - clkTotal) );
++
+     }
+ 
+     pTemp = p->pAig; p->pAig = NULL;
+@@ -557,6 +813,8 @@
+     Cec_ManSimStop( pSim );
+     Cec_ManPatStop( pPat );
+     Cec_ManFraStop( p );
++    Vec_IntFreeP( &vStructPairs );
++    Vec_IntFreeP( &vFailedPairs );
+     if ( pTemp ) ABC_FREE( pTemp->pReprs );
+     if ( pTemp ) ABC_FREE( pTemp->pNexts );
+     return pTemp;
+@@ -569,4 +827,3 @@
+ 
+ 
+ ABC_NAMESPACE_IMPL_END
+-
+--- a/src/proof/cec/cecSolve.c
++++ b/src/proof/cec/cecSolve.c
+@@ -723,6 +723,20 @@
+     {
+         if ( Gia_ObjIsConst0(Gia_ObjFanin0(pObj)) )
+         {
++            // A constant CO is normally discharged structurally without
++            // calling sat_solver_solve().  This is forbidden for strict -U
++            // extraction: only an UNSAT result from a real SAT query may
++            // authorize merging/exporting a pair.  The strict speculative
++            // reducer preserves such miters as CNF, so reaching this guard is
++            // an invariant violation; mark the candidate failed, never proved.
++            if ( pPars->fRequireSatCall )
++            {
++                Abc_Print( -1, "Strict SAT error: miter output %d was simplified to a constant before SAT.\n", i );
++                pObj->fMark0 = pObj->fMark1 = 0;
++                if ( pPars->fSaveCexes )
++                    Vec_PtrWriteEntry( pAig->vSeqModelVec, i, NULL );
++                continue;
++            }
+             status = !Gia_ObjFaninC0(pObj);
+             pObj->fMark0 = (status == 0);
+             pObj->fMark1 = (status == 1);
+@@ -735,14 +749,25 @@
+         status = Cec_ManSatCheckNode( p, Gia_ObjChild0(pObj) );
+         pObj->fMark0 = (status == 0);
+         pObj->fMark1 = (status == 1);
+-        if ( status == 1 && vIdsOrig )
+-        {
+-            int iObj1 = Vec_IntEntry(vMiterPairs, 2*i);
+-            int iObj2 = Vec_IntEntry(vMiterPairs, 2*i+1);
+-            int OrigId1 = Vec_IntEntry(vIdsOrig, iObj1);
+-            int OrigId2 = Vec_IntEntry(vIdsOrig, iObj2);
+-            assert( OrigId1 >= 0 && OrigId2 >= 0 );
+-            Vec_IntPushTwo( vEquivPairs, OrigId1, OrigId2 );
++        // Record every proved miter in original IDs at the proof point. Waiting
++        // until class adoption loses dependent candidates that become
++        // structurally folded during the same reduction (notably CONST1 nodes
++        // whose CONST0 fanins were just proved). Output writers deduplicate the
++        // pair also recorded by Cec_ManFraClassesUpdate when it is adopted.
++        if ( status == 1 && vIdsOrig && vMiterPairs && vEquivPairs &&
++             2*i + 1 < Vec_IntSize(vMiterPairs) )
++        {
++            int iRepr = Vec_IntEntry( vMiterPairs, 2*i );
++            int iNode = Vec_IntEntry( vMiterPairs, 2*i + 1 );
++            if ( iRepr >= 0 && iRepr < Vec_IntSize(vIdsOrig) &&
++                 iNode >= 0 && iNode < Vec_IntSize(vIdsOrig) )
++            {
++                int OrigIdRepr = Vec_IntEntry( vIdsOrig, iRepr );
++                int OrigIdNode = Vec_IntEntry( vIdsOrig, iNode );
++                if ( OrigIdRepr >= 0 && OrigIdNode >= 0 &&
++                     OrigIdRepr != OrigIdNode )
++                    Vec_IntPushTwo( vEquivPairs, OrigIdRepr, OrigIdNode );
++            }
+         }
+         if ( pPars->fSaveCexes && status != -1 )
+             Vec_PtrWriteEntry( pAig->vSeqModelVec, i, status ? (Abc_Cex_t *)(ABC_PTRINT_T)1 : Cex_ManGenCex(p, i) );
+@@ -1138,4 +1163,3 @@
+ 
+ 
+ ABC_NAMESPACE_IMPL_END
+-
+--- a/src/proof/cec/cecSweep.c
++++ b/src/proof/cec/cecSweep.c
+@@ -46,7 +46,7 @@
+ {
+     Gia_Man_t * pNew, * pTemp;
+     Gia_Obj_t * pObj, * pRepr = NULL;
+-    int iRes0, iRes1, iRepr, iNode, iMiter;
++    int iRes0, iRes1, iRepr, iNode, iMiter, iSpecLit;
+     int i, fCompl, * piCopies, * pDepths;
+     Gia_ManSetPhase( p->pAig );
+     Vec_IntClear( p->vXorNodes );
+@@ -55,7 +55,16 @@
+     pNew = Gia_ManStart( Gia_ManObjNum(p->pAig) );
+     pNew->pName = Abc_UtilStrsav( p->pAig->pName );
+     pNew->pSpec = Abc_UtilStrsav( p->pAig->pName );
+-    Gia_ManHashAlloc( pNew );
++    // In strict (-U) mode, keep one node for every source AND.  Strashing the
++    // speculative network can make two candidates structurally identical (or
++    // reduce a constant candidate to literal 0), which turns their XOR into a
++    // constant and bypasses sat_solver_solve().  A simple/unstrashed network
++    // preserves the Boolean relation in CNF while ensuring every candidate has
++    // a real SAT query before it can be merged or exported.
++    if ( p->pPars->fStrictSatPairs )
++        pNew->fGiaSimple = 1;
++    else
++        Gia_ManHashAlloc( pNew );
+     piCopies = ABC_FALLOC( int, Gia_ManObjNum(p->pAig) );
+     pDepths  = ABC_CALLOC( int, Gia_ManObjNum(p->pAig) );
+     piCopies[0] = 0;
+@@ -73,7 +82,9 @@
+              continue;
+         iRes0 = Abc_LitNotCond( piCopies[Gia_ObjFaninId0(pObj,i)], Gia_ObjFaninC0(pObj) );
+         iRes1 = Abc_LitNotCond( piCopies[Gia_ObjFaninId1(pObj,i)], Gia_ObjFaninC1(pObj) );
+-        iNode = piCopies[i] = Gia_ManHashAnd( pNew, iRes0, iRes1 );
++        iNode = piCopies[i] = p->pPars->fStrictSatPairs ?
++            Gia_ManAppendAnd( pNew, iRes0, iRes1 ) :
++            Gia_ManHashAnd( pNew, iRes0, iRes1 );
+         pDepths[i] = Abc_MaxInt( pDepths[Gia_ObjFaninId0(pObj,i)], pDepths[Gia_ObjFaninId1(pObj,i)] );
+         if ( Gia_ObjRepr(p->pAig, i) == GIA_VOID || Gia_ObjFailed(p->pAig, i) )
+             continue;
+@@ -81,8 +92,22 @@
+         iRepr = piCopies[Gia_ObjRepr(p->pAig, i)];
+         if ( iRepr == -1 )
+             continue;
+-        if ( Abc_LitRegular(iNode) == Abc_LitRegular(iRepr) )
+-            continue;
++        if ( Abc_LitRegular(iNode) == Abc_LitRegular(iRepr) && !p->pPars->fStrictSatPairs )
++        {
++            // Structurally implied equivalent pair in the current reduced AIG:
++            // record original IDs for completeness of final class dumping.
++            if ( p->pAig->vIdsOrig && p->pPars->pStructPairsVec )
++            {
++                int OrigIdRepr = Vec_IntEntry( p->pAig->vIdsOrig, Gia_ObjRepr(p->pAig, i) );
++                int OrigIdNode = Vec_IntEntry( p->pAig->vIdsOrig, i );
++                if ( OrigIdRepr >= 0 && OrigIdNode >= 0 && OrigIdRepr != OrigIdNode )
++                {
++                    Vec_Int_t * vStructPairs = (Vec_Int_t *)p->pPars->pStructPairsVec;
++                    Vec_IntPushTwo( vStructPairs, OrigIdRepr, OrigIdNode );
++                }
++            }
++            continue;
++        }
+         if ( p->pPars->nLevelMax && 
+             (Gia_ObjLevelId(p->pAig, i)  > p->pPars->nLevelMax || 
+              Gia_ObjLevelId(p->pAig, Abc_Lit2Var(iRepr)) > p->pPars->nLevelMax) )
+@@ -104,11 +129,14 @@
+         }
+         pRepr = Gia_ManObj( p->pAig, Gia_ObjRepr(p->pAig, i) );
+         fCompl = Gia_ObjPhaseReal(pObj) ^ Gia_ObjPhaseReal(pRepr);
+-        piCopies[i] = Abc_LitNotCond( iRepr, fCompl );
++        iSpecLit = Abc_LitNotCond( iRepr, fCompl );
++        if ( !p->pPars->fStrictSatPairs )
++            piCopies[i] = iSpecLit;
+         if ( Gia_ObjProved(p->pAig, i) )
+             continue;
+-        // produce speculative miter
+-        iMiter = Gia_ManHashXor( pNew, iNode, piCopies[i] );
++        // produce miter against representative.
++        // In strict mode (-U), substitution is disabled and all candidates stay on SAT-track.
++        iMiter = Gia_ManHashXor( pNew, iNode, iSpecLit );
+         Gia_ManAppendCo( pNew, iMiter );
+         Vec_IntPush( p->vXorNodes, Gia_ObjRepr(p->pAig, i) );
+         Vec_IntPush( p->vXorNodes, i );
+@@ -119,8 +147,14 @@
+     }
+     ABC_FREE( piCopies );
+     ABC_FREE( pDepths );
+-    Gia_ManHashStop( pNew );
++    if ( !p->pPars->fStrictSatPairs )
++        Gia_ManHashStop( pNew );
+     Gia_ManSetRegNum( pNew, 0 );
++    // Cleanup duplicates the graph in normal GIA mode.  In strict mode this
++    // would re-enable structural assumptions (and may reject deliberately
++    // unstrashed nodes), so retain the SAT network exactly as constructed.
++    if ( p->pPars->fStrictSatPairs )
++        return pNew;
+     pNew = Gia_ManCleanup( pTemp = pNew );
+     Gia_ManStop( pTemp );
+     return pNew;
+@@ -266,6 +300,17 @@
+                 assert( iRepr == Gia_ObjRepr(p->pAig, iNode) );
+                 Gia_ObjSetProved( p->pAig, iNode );
+                 p->nAllProved++;
++                // Collect SAT-proved equivalence pairs using original IDs into vIdsEquiv
++                if ( p->pAig->vIdsOrig && p->pPars->pEquivPairsVec )
++                {
++                    int OrigIdRepr = Vec_IntEntry( p->pAig->vIdsOrig, iRepr );
++                    int OrigIdNode = Vec_IntEntry( p->pAig->vIdsOrig, iNode );
++                    if ( OrigIdRepr >= 0 && OrigIdNode >= 0 )
++                    {
++                        Vec_Int_t * vEquivPairs = (Vec_Int_t *)p->pPars->pEquivPairsVec;
++                        Vec_IntPushTwo( vEquivPairs, OrigIdRepr, OrigIdNode );
++                    }
++                }
+             }
+         }
+         else if ( pObj->fMark0 )
+@@ -286,6 +331,16 @@
+             assert( !Gia_ObjFailed(p->pAig, iNode) );
+             assert( !Gia_ObjProved(p->pAig, iNode) );
+             Gia_ObjSetFailed( p->pAig, iNode );
++            if ( p->pAig->vIdsOrig && p->pPars->pFailedPairsVec )
++            {
++                int OrigIdRepr = Vec_IntEntry( p->pAig->vIdsOrig, iRepr );
++                int OrigIdNode = Vec_IntEntry( p->pAig->vIdsOrig, iNode );
++                if ( OrigIdRepr >= 0 && OrigIdNode >= 0 && OrigIdRepr != OrigIdNode )
++                {
++                    Vec_Int_t * vFailedPairs = (Vec_Int_t *)p->pPars->pFailedPairsVec;
++                    Vec_IntPushTwo( vFailedPairs, OrigIdRepr, OrigIdNode );
++                }
++            }
+             p->nAllFailed++;
+         }
+     } 
+@@ -301,4 +356,3 @@
+ 
+ 
+ ABC_NAMESPACE_IMPL_END
+-
